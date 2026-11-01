@@ -310,6 +310,9 @@
       background: #fafafa;
     }
 
+    .archive-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:10px 0; }
+    .archive-status { font-size:.78rem; color:#444; }
+    .export-btn:disabled { opacity:.45; cursor:not-allowed; }
     @media (max-width: 420px) {
       .daily-table-wrapper { max-height: 180px; }
       .daily-table th,
@@ -370,6 +373,10 @@
         <span class="month-label" id="month-label"></span>
         <button class="export-btn" id="export-btn">Exportar</button>
       </div>
+      <div class="archive-controls">
+        <button class="export-btn" id="previous-btn" type="button">Descarregar mes anterior</button>
+        <span id="previous-status" class="archive-status"></span>
+      </div>
       <div class="daily-table-wrapper">
         <table class="daily-table">
           <thead>
@@ -405,98 +412,81 @@ const buttons = [
 const UNITS_KEYS     = ["presentado", ...buttons.map(b => b.key)];
 const PRESENTED_KEYS = ["presentado"];
 
-const STORAGE_KEY = "segurosCounter_v4";
+const STORAGE_KEY = "segurosCounter_v5";
+const LEGACY_KEY = "segurosCounter_v4";
+let state = { months: {}, exported: {} };
 
-/* Estructura del estado:
-   {
-     counts: {presentado: n, ...}    // acumulado del mes
-     monthId: "YYYY-MM",
-     daily: {
-       "YYYY-MM-DD": { counts: {presentado: n,...} }
-     }
-   }
-*/
-let state = { counts: {}, monthId: "", daily: {} };
-
-/* ---------- FECHAS ---------- */
-
-function todayDate() {
-  return new Date();
-}
-
+function todayDate() { return new Date(); }
 function formatDateKey(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
 }
-
-function formatMonthId(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
+function formatMonthId(d) { return formatDateKey(d).slice(0,7); }
 function getCurrentMonthDays() {
-  const d = todayDate();
-  const year = d.getFullYear();
-  const month = d.getMonth();
-  const todayDay = d.getDate();
-  return { year, month, todayDay };
+  const d=todayDate(); return {year:d.getFullYear(),month:d.getMonth(),todayDay:d.getDate()};
 }
-
-/* ---------- ESTADO ---------- */
-
 function emptyCounts() {
-  const obj = { presentado: 0 };
-  buttons.forEach(b => { obj[b.key] = 0; });
-  return obj;
+  const obj={presentado:0}; buttons.forEach(b=>obj[b.key]=0); return obj;
 }
-
-function initStateForCurrentMonth() {
-  const now = todayDate();
-  state = {
-    counts: emptyCounts(),
-    monthId: formatMonthId(now),
-    daily: {}
-  };
+function normalizeCounts(c) {
+  const out=emptyCounts();
+  for(const k of UNITS_KEYS) if(Number.isSafeInteger(c?.[k]) && c[k]>=0) out[k]=c[k];
+  return out;
 }
-
+function normalizeMonth(m) {
+  const daily={};
+  if(m?.daily && typeof m.daily==="object") for(const [date,entry] of Object.entries(m.daily)) {
+    if(/^\d{4}-\d{2}-\d{2}$/.test(date)) daily[date]={counts:normalizeCounts(entry?.counts)};
+  }
+  return {counts:normalizeCounts(m?.counts),daily};
+}
+function ensureMonth(id=formatMonthId(todayDate())) {
+  if(!state.months[id]) state.months[id]={counts:emptyCounts(),daily:{}};
+  return state.months[id];
+}
 function loadState() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  const now = todayDate();
-  const currentMonthId = formatMonthId(now);
-
-  if (!raw) {
-    initStateForCurrentMonth();
-    return;
-  }
-
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed.monthId || parsed.monthId !== currentMonthId) {
-      // Mes nuevo -> reseteamos todo
-      initStateForCurrentMonth();
-      return;
+    const raw=localStorage.getItem(STORAGE_KEY);
+    if(raw) {
+      const parsed=JSON.parse(raw);
+      if(parsed?.months && typeof parsed.months==="object") {
+        state={months:{},exported:parsed.exported||{}};
+        for(const [id,m] of Object.entries(parsed.months)) if(/^\d{4}-\d{2}$/.test(id)) state.months[id]=normalizeMonth(m);
+      }
+    } else {
+      // Migrar sin eliminar el almacenamiento original.
+      const old=localStorage.getItem(LEGACY_KEY);
+      if(old) {
+        const parsed=JSON.parse(old);
+        if(/^\d{4}-\d{2}$/.test(parsed?.monthId||"")) state.months[parsed.monthId]=normalizeMonth(parsed);
+      }
     }
-    state.monthId = parsed.monthId;
-    state.counts  = { ...emptyCounts(), ...(parsed.counts || {}) };
-    state.daily   = parsed.daily || {};
-  } catch {
-    initStateForCurrentMonth();
-  }
+  } catch(e) { console.warn("No se pudieron cargar los datos:",e); }
+  ensureMonth();
+  saveState();
 }
-
 function saveState() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  try { localStorage.setItem(STORAGE_KEY,JSON.stringify(state)); }
+  catch(e) { alert("No se han podido guardar los datos. Comprueba el almacenamiento del navegador y exporta una copia."); }
 }
-
+function currentMonth() { return ensureMonth(); }
 function ensureTodayDaily() {
-  const key = formatDateKey(todayDate());
-  if (!state.daily[key]) {
-    state.daily[key] = { counts: emptyCounts() };
-  }
-  return key;
+  const month=currentMonth(), key=formatDateKey(todayDate());
+  if(!month.daily[key]) month.daily[key]={counts:emptyCounts()};
+  return month.daily[key].counts;
+}
+function syncMonth() {
+  const id=formatMonthId(todayDate());
+  if(!state.months[id]) { ensureMonth(id); saveState(); }
+}
+function previousMonthId() {
+  const d=todayDate(); return formatMonthId(new Date(d.getFullYear(),d.getMonth()-1,1));
+}
+function updateArchiveControls() {
+  const id=previousMonthId(), btn=document.getElementById("previous-btn"), status=document.getElementById("previous-status");
+  const month=state.months[id];
+  btn.disabled=!month;
+  btn.textContent=`Descarregar ${new Date(Number(id.slice(0,4)),Number(id.slice(5,7))-1,1).toLocaleDateString("ca-ES",{month:"long",year:"numeric"})}`;
+  status.textContent=!month?"No hi ha dades guardades d'aquest mes":state.exported[id]?"Ja descarregat (pots repetir)":"Pendent de descarregar";
 }
 
 /* ---------- CÁLCULOS ---------- */
@@ -517,7 +507,7 @@ function computeTotalsFromCounts(countsObj) {
 }
 
 function computeMonthlyTotals() {
-  return computeTotalsFromCounts(state.counts);
+  return computeTotalsFromCounts(currentMonth().counts);
 }
 
 /* Cambia el color de fondo de la tarjeta según el objetivo */
@@ -558,7 +548,7 @@ function renderButtons() {
     circle.dataset.key = btn.key;
     const span = document.createElement("span");
     span.className = "count";
-    span.textContent = state.counts[btn.key] || 0;
+    span.textContent = currentMonth().counts[btn.key] || 0;
     circle.appendChild(span);
     circle.onclick = () => increment(btn.key);
 
@@ -586,13 +576,13 @@ function renderTotals() {
   objBox.classList.toggle("bad", objetivo < 0);
 
   document.getElementById("count-presentado").textContent =
-    state.counts.presentado || 0;
+    currentMonth().counts.presentado || 0;
 
   buttons.forEach(btn => {
     const el = document.querySelector(
       `.circle-btn[data-key="${btn.key}"] .count`
     );
-    if (el) el.textContent = state.counts[btn.key] || 0;
+    if (el) el.textContent = currentMonth().counts[btn.key] || 0;
   });
 
   updateBackgroundByObjective();
@@ -615,7 +605,7 @@ function renderDailyTable() {
   for (let day = 1; day <= todayDay; day++) {
     const d = new Date(year, month, day);
     const key = formatDateKey(d);
-    const dayCounts = state.daily[key]?.counts || emptyCounts();
+    const dayCounts = currentMonth().daily[key]?.counts || emptyCounts();
     const { totalUnits, presented, objetivo } = computeTotalsFromCounts(dayCounts);
 
     const tr = document.createElement("tr");
@@ -641,112 +631,46 @@ function renderDailyTable() {
 }
 
 /* ---------- ACCIONES ---------- */
-
 function increment(key) {
-  state.counts[key] = (state.counts[key] || 0) + 1;
-
-  const todayKey = ensureTodayDaily();
-  const dayCounts = state.daily[todayKey].counts;
-  dayCounts[key] = (dayCounts[key] || 0) + 1;
-
-  saveState();
-  renderTotals();
-  renderDailyTable();
+  syncMonth(); const m=currentMonth();
+  m.counts[key]++; ensureTodayDaily()[key]++;
+  saveState(); renderTotals(); renderDailyTable(); updateArchiveControls();
 }
-
 function decrement(key) {
-  if (!state.counts[key]) return;
-
-  state.counts[key] = Math.max(0, (state.counts[key] || 0) - 1);
-
-  const todayKey = ensureTodayDaily();
-  const dayCounts = state.daily[todayKey].counts;
-  dayCounts[key] = Math.max(0, (dayCounts[key] || 0) - 1);
-
-  saveState();
-  renderTotals();
-  renderDailyTable();
+  syncMonth(); const m=currentMonth(), day=ensureTodayDaily();
+  // No restar registros de otros días: así no se altera el histórico diario.
+  if(!day[key]) return;
+  day[key]--; m.counts[key]--;
+  saveState(); renderTotals(); renderDailyTable(); updateArchiveControls();
 }
-
 function clearAll() {
-  if (!confirm("¿Seguro que quieres borrar todos los datos de este mes y empezar de cero?")) return;
-  initStateForCurrentMonth();
-  saveState();
-  renderButtons();
-  renderTotals();
-  renderDailyTable();
+  if(!confirm("¿Seguro que quieres borrar los datos del mes actual? Los meses anteriores se conservarán.")) return;
+  state.months[formatMonthId(todayDate())]={counts:emptyCounts(),daily:{}};
+  saveState(); renderButtons(); renderTotals(); renderDailyTable(); updateArchiveControls();
 }
-
-/* ---------- EXPORTAR CSV ---------- */
-
-function exportCSV() {
-  const { year, month, todayDay } = getCurrentMonthDays();
-  const monthName = new Date(year, month, 1).toLocaleString("es-ES", {
-    month: "long",
-    year: "numeric"
-  });
-
-  const header = [
-    "Fecha",
-    "Presentado",
-    "No presentado",
-    "Reserva",
-    "No lo quiere",
-    "Ticket",
-    "Extranjero",
-    "Rescisión",
-    "Abono",
-    "Factura",
-    "Regalo",
-    "Total unidades",
-    "Presentados",
-    "Objetivo"
-  ];
-
-  const rows = [];
-  rows.push(header.join(";"));
-
-  for (let day = 1; day <= todayDay; day++) {
-    const d = new Date(year, month, day);
-    const key = formatDateKey(d);
-    const dayCounts = state.daily[key]?.counts || emptyCounts();
-    const { totalUnits, presented, objetivo } = computeTotalsFromCounts(dayCounts);
-
-    const fecha = key; // YYYY-MM-DD
-
-    const row = [
-      fecha,
-      dayCounts.presentado   || 0,
-      dayCounts.noPresentado || 0,
-      dayCounts.reserva      || 0,
-      dayCounts.noLoQuiere   || 0,
-      dayCounts.ticket       || 0,
-      dayCounts.extranjero   || 0,
-      dayCounts.rescicion    || 0,
-      dayCounts.abono        || 0,
-      dayCounts.factura      || 0,
-      dayCounts.regalo       || 0,
-      totalUnits,
-      presented,
-      objetivo
-    ];
-
-    rows.push(row.join(";"));
+function exportMonth(id) {
+  const m=state.months[id]; if(!m) return;
+  const [year,month]=id.split("-").map(Number);
+  const days=new Date(year,month,0).getDate();
+  const isCurrent=id===formatMonthId(todayDate());
+  const maxDay=isCurrent?todayDate().getDate():days;
+  const header=["Fecha","Presentado",...buttons.map(b=>b.label),"Total unidades","Presentados","Objetivo"];
+  const rows=[header.join(";")];
+  for(let day=1;day<=maxDay;day++) {
+    const date=`${id}-${String(day).padStart(2,"0")}`;
+    const c=m.daily[date]?.counts||emptyCounts();
+    const {totalUnits,presented,objetivo}=computeTotalsFromCounts(c);
+    rows.push([date,c.presentado,...buttons.map(b=>c[b.key]||0),totalUnits,presented,objetivo].join(";"));
   }
-
-  const csvContent = rows.join("\n");
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  link.href = url;
-  const fname = `recuento_seguros_${monthName.replace(/\s+/g,"_")}.csv`;
-  link.download = fname;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  const blob=new Blob(["\ufeff"+rows.join("\r\n")],{type:"text/csv;charset=utf-8"});
+  const url=URL.createObjectURL(blob), link=document.createElement("a");
+  link.href=url; link.download=`recuento_seguros_${id}.csv`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),3000);
+  state.exported[id]=new Date().toISOString(); saveState(); updateArchiveControls();
 }
+function exportCSV() { syncMonth(); exportMonth(formatMonthId(todayDate())); }
+function exportPrevious() { exportMonth(previousMonthId()); }
 
 /* ---------- ARRANQUE ---------- */
 
@@ -755,11 +679,15 @@ function main() {
   renderButtons();
   renderTotals();
   renderDailyTable();
+  updateArchiveControls();
 
   document.getElementById("btn-presentado").onclick   = () => increment("presentado");
   document.getElementById("minus-presentado").onclick = () => decrement("presentado");
   document.getElementById("clear-btn").onclick        = clearAll;
   document.getElementById("export-btn").onclick       = exportCSV;
+  document.getElementById("previous-btn").onclick = exportPrevious;
+  document.addEventListener("visibilitychange",()=>{if(!document.hidden){syncMonth();renderTotals();renderDailyTable();updateArchiveControls();}});
+  setInterval(()=>{const before=Object.keys(state.months).sort().at(-1);syncMonth();if(formatMonthId(todayDate())!==before){renderTotals();renderDailyTable();updateArchiveControls();}},60000);
 
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {});
